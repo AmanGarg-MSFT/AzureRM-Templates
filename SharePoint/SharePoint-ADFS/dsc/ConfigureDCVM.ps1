@@ -104,82 +104,6 @@
         WindowsFeature AddADFeature1    { Name = "RSAT-ADLDS";          Ensure = "Present"; DependsOn = "[xPendingReboot]Reboot1" }
         WindowsFeature AddADFeature2    { Name = "RSAT-ADDS-Tools";     Ensure = "Present"; DependsOn = "[xPendingReboot]Reboot1" }
 
-        #**********************************************************
-        # Configure AD CS
-        #**********************************************************
-        WindowsFeature AddCertAuthority       { Name = "ADCS-Cert-Authority"; Ensure = "Present"; DependsOn = "[xPendingReboot]Reboot1" }
-        WindowsFeature AddADCSManagementTools { Name = "RSAT-ADCS-Mgmt";      Ensure = "Present"; DependsOn = "[xPendingReboot]Reboot1" }
-        ADCSCertificationAuthority ADCS
-        {
-            Ensure = "Present"
-            Credential = $DomainCredsNetbios
-            CAType = "EnterpriseRootCA"
-            DependsOn = "[WindowsFeature]AddCertAuthority"
-        }
-
-        #**********************************************************
-        # Configure AD FS
-        #**********************************************************
-        WaitForCertificateServices WaitAfterADCSProvisioning
-        {
-            CAServerFQDN = "$ComputerName.$DomainFQDN"
-            CARootName = "$DomainNetbiosName-$ComputerName-CA"
-            DependsOn = '[ADCSCertificationAuthority]ADCS'
-            PsDscRunAsCredential = $DomainCredsNetbios
-        }
-
-        CertReq ADFSSiteCert
-        {
-            CARootName                = "$DomainNetbiosName-$ComputerName-CA"
-            CAServerFQDN              = "$ComputerName.$DomainFQDN"
-            Subject                   = "$ADFSSiteName.$DomainFQDN"
-            FriendlyName              = "$ADFSSiteName.$DomainFQDN site certificate"
-            KeyLength                 = '2048'
-            Exportable                = $true
-            ProviderName              = '"Microsoft RSA SChannel Cryptographic Provider"'
-            OID                       = '1.3.6.1.5.5.7.3.1'
-            KeyUsage                  = '0xa0'
-            CertificateTemplate       = 'WebServer'
-            AutoRenew                 = $true
-            SubjectAltName            = "dns=certauth.$ADFSSiteName.$DomainFQDN&dns=$ADFSSiteName.$DomainFQDN"
-            Credential                = $DomainCredsNetbios
-            DependsOn = '[WaitForCertificateServices]WaitAfterADCSProvisioning'
-        }
-
-        CertReq ADFSSigningCert
-        {
-            CARootName                = "$DomainNetbiosName-$ComputerName-CA"
-            CAServerFQDN              = "$ComputerName.$DomainFQDN"
-            Subject                   = "$ADFSSiteName.Signing"
-            FriendlyName              = "$ADFSSiteName Signing"
-            KeyLength                 = '2048'
-            Exportable                = $true
-            ProviderName              = '"Microsoft RSA SChannel Cryptographic Provider"'
-            OID                       = '1.3.6.1.5.5.7.3.1'
-            KeyUsage                  = '0xa0'
-            CertificateTemplate       = 'WebServer'
-            AutoRenew                 = $true
-            Credential                = $DomainCredsNetbios
-            DependsOn = '[WaitForCertificateServices]WaitAfterADCSProvisioning'
-        }
-
-        CertReq ADFSDecryptionCert
-        {
-            CARootName                = "$DomainNetbiosName-$ComputerName-CA"
-            CAServerFQDN              = "$ComputerName.$DomainFQDN"
-            Subject                   = "$ADFSSiteName.Decryption"
-            FriendlyName              = "$ADFSSiteName Decryption"
-            KeyLength                 = '2048'
-            Exportable                = $true
-            ProviderName              = '"Microsoft RSA SChannel Cryptographic Provider"'
-            OID                       = '1.3.6.1.5.5.7.3.1'
-            KeyUsage                  = '0xa0'
-            CertificateTemplate       = 'WebServer'
-            AutoRenew                 = $true
-            Credential                = $DomainCredsNetbios
-            DependsOn = '[WaitForCertificateServices]WaitAfterADCSProvisioning'
-        }
-
         xADUser CreateAdfsSvcAccount
         {
             DomainAdministratorCredential = $DomainCredsNetbios
@@ -189,7 +113,7 @@
             Ensure = "Present"
             PasswordAuthentication = 'Negotiate'
             PasswordNeverExpires = $true
-            DependsOn = "[CertReq]ADFSSiteCert", "[CertReq]ADFSSigningCert", "[CertReq]ADFSDecryptionCert"
+            DependsOn = "[xPendingReboot]Reboot1"
         }
 
         Group AddAdfsSvcAccountToDomainAdminsGroup
@@ -202,8 +126,6 @@
             DependsOn = "[xADUser]CreateAdfsSvcAccount"
         }
 
-        WindowsFeature AddADFS { Name = "ADFS-Federation"; Ensure = "Present"; DependsOn = "[Group]AddAdfsSvcAccountToDomainAdminsGroup" }
-
         xDnsRecord AddADFSHostDNS {
             Name = $ADFSSiteName
             Zone = $DomainFQDN
@@ -211,74 +133,7 @@
             Type = "ARecord"
             Ensure = "Present"
             DependsOn = "[xPendingReboot]Reboot1"
-        }
-
-        xScript ExportCertificates
-        {
-            SetScript = 
-            {
-                $destinationPath = "C:\Setup"
-                $adfsSigningCertName = "ADFS Signing.cer"
-                $adfsSigningIssuerCertName = "ADFS Signing issuer.cer"
-                Write-Verbose -Message "Exporting public key of ADFS signing / signing issuer certificates..."
-                New-Item $destinationPath -Type directory -ErrorAction SilentlyContinue
-                $signingCert = Get-ChildItem -Path "cert:\LocalMachine\My\" -DnsName "$using:ADFSSiteName.Signing"
-                $signingCert| Export-Certificate -FilePath ([System.IO.Path]::Combine($destinationPath, $adfsSigningCertName))
-                Get-ChildItem -Path "cert:\LocalMachine\Root\"| Where-Object{$_.Subject -eq  $signingCert.Issuer}| Select-Object -First 1| Export-Certificate -FilePath ([System.IO.Path]::Combine($destinationPath, $adfsSigningIssuerCertName))
-                Write-Verbose -Message "Public key of ADFS signing / signing issuer certificates successfully exported"
-            }
-            GetScript =  
-            {
-                # This block must return a hashtable. The hashtable must only contain one key Result and the value must be of type String.
-                return @{ "Result" = "false" }
-            }
-            TestScript = 
-            {
-                # If it returns $false, the SetScript block will run. If it returns $true, the SetScript block will not run.
-               return $false
-            }
-            DependsOn = "[WindowsFeature]AddADFS"
-        }
-
-        cADFSFarm CreateADFSFarm
-        {
-            ServiceCredential = $AdfsSvcCredsQualified
-            InstallCredential = $DomainCredsNetbios
-            #CertificateThumbprint = $siteCert
-            DisplayName = "$ADFSSiteName.$DomainFQDN"
-            ServiceName = "$ADFSSiteName.$DomainFQDN"
-            #SigningCertificateThumbprint = $signingCert
-            #DecryptionCertificateThumbprint = $decryptionCert
-            CertificateName = "$ADFSSiteName.$DomainFQDN"
-            SigningCertificateName = "$ADFSSiteName.Signing"
-            DecryptionCertificateName = "$ADFSSiteName.Decryption"
-            Ensure= 'Present'
-            PsDscRunAsCredential = $DomainCredsNetbios
-            DependsOn = "[WindowsFeature]AddADFS"
-        }
-
-        cADFSRelyingPartyTrust CreateADFSRelyingParty
-        {
-            Name = $SPTrustedSitesName
-            Identifier = "https://$SPTrustedSitesName.$DomainFQDN"
-            ClaimsProviderName = @("Active Directory")
-            WsFederationEndpoint = "https://$SPTrustedSitesName.$DomainFQDN/_trust/"
-            IssuanceAuthorizationRules = '=> issue (Type = "http://schemas.microsoft.com/authorization/claims/permit", value = "true");'
-            IssuanceTransformRules = @"
-@RuleTemplate = "LdapClaims"
-@RuleName = "AD"
-c:[Type == "http://schemas.microsoft.com/ws/2008/06/identity/claims/windowsaccountname", Issuer == "AD AUTHORITY"]
-=> issue(
-store = "Active Directory", 
-types = ("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress", "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"), 
-query = ";mail,tokenGroups(longDomainQualifiedName);{0}", 
-param = c.Value);
-"@
-            ProtocolProfile = "WsFed-SAML"
-            Ensure= 'Present'
-            PsDscRunAsCredential = $DomainCredsNetbios
-            DependsOn = "[cADFSFarm]CreateADFSFarm"
-        }
+        }        
     }
 }
 
